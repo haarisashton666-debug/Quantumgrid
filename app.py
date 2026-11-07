@@ -1,5 +1,6 @@
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import requests
@@ -32,7 +33,7 @@ refresh = st.sidebar.slider("Refresh every (sec)", 2, 60, 5)
 def get_weather(lat, lon):
     r = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,wind_speed_10m,shortwave_radiation,cloud_cover",
+        "current": "temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation,surface_pressure,shortwave_radiation,cloud_cover",
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
         "past_days": 1, "forecast_days": 2,
         "timezone": "auto", "wind_speed_unit": "ms"}, timeout=15)
@@ -86,8 +87,30 @@ def live():
     total = s_kw + w_kw
     capacity = solar_area * 0.18 * 0.8 + wind_rated
 
+    ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M:%S")
     st.title(f"🌍 Renewable Energy Intelligence – {place}")
-    st.caption(f"Live · updated {time.strftime('%H:%M:%S')} · source: {src}")
+    st.caption(f"Live · updated {ist} IST · source: {src}")
+
+    # ---------- Disaster alert banner ----------
+    gust = float(c.get("wind_gusts_10m") or 0)
+    rain = float(c.get("precipitation") or 0)
+    pres = float(c.get("surface_pressure") or 1013)
+    if gust >= 25 or pres < 990:
+        lvl, col, msg = "RED – DANGER", "#ef4444", "Shut down turbines, switch to battery backup, move to shelter."
+    elif gust >= 17 or rain >= 15 or pres < 1000:
+        lvl, col, msg = "ORANGE – WARNING", "#f97316", "Prepare backup power and secure equipment."
+    elif gust >= 11 or rain >= 5:
+        lvl, col, msg = "YELLOW – WATCH", "#eab308", "Stay alert and keep monitoring updates."
+    else:
+        lvl, col, msg = "GREEN – NORMAL", "#22c55e", "Normal operation."
+    st.markdown(
+        f"<div style='background:{col}22;border:2px solid {col};border-radius:14px;"
+        f"padding:14px;margin:10px 0'><h3 style='margin:0;color:{col}'>⚠ {lvl}</h3>"
+        f"<p style='margin:6px 0 0'>Gusts {gust:.1f} m/s · Rain {rain:.1f} mm · "
+        f"Pressure {pres:.0f} hPa<br>{msg}</p>"
+        f"<p style='margin:6px 0 0;font-size:12px;opacity:.7'>Demo thresholds. "
+        f"Always follow official IMD warnings (imd.gov.in).</p></div>",
+        unsafe_allow_html=True)
 
     cards = [("🌡 Temperature", f"{c['temperature_2m']:.1f} °C"),
              ("💨 Wind speed", f"{c['wind_speed_10m']:.1f} m/s"),
@@ -96,9 +119,9 @@ def live():
              ("🌀 Wind output", f"{w_kw:.1f} kW"),
              ("⚡ Total", f"{total:.1f} kW")]
     cols = st.columns(6)
-    for col, (t, v) in zip(cols, cards):
-        col.markdown(f"<div class='card'><h4>{t}</h4><h2>{v}</h2></div>",
-                     unsafe_allow_html=True)
+    for cc, (t, v) in zip(cols, cards):
+        cc.markdown(f"<div class='card'><h4>{t}</h4><h2>{v}</h2></div>",
+                    unsafe_allow_html=True)
 
     h = pd.DataFrame(w["hourly"])
     h["time"] = pd.to_datetime(h["time"])
