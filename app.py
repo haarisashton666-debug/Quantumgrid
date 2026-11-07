@@ -28,12 +28,22 @@ solar_area = st.sidebar.slider("Solar panel area (m²)", 10, 2000, 200)
 wind_rated = st.sidebar.slider("Wind turbine rated (kW)", 1, 500, 50)
 refresh = st.sidebar.slider("Refresh every (sec)", 2, 60, 5)
 
+with st.sidebar.expander("Alert limits"):
+    y_gust = st.number_input("Yellow: gust above (m/s)", value=11.0)
+    o_gust = st.number_input("Orange: gust above (m/s)", value=17.0)
+    r_gust = st.number_input("Red: gust above (m/s)", value=25.0)
+    y_rain = st.number_input("Yellow: rain above (mm)", value=5.0)
+    o_rain = st.number_input("Orange: rain above (mm)", value=15.0)
+    r_rain = st.number_input("Red: rain above (mm)", value=30.0)
+    o_pres = st.number_input("Orange: sea-level pressure below (hPa)", value=1000.0)
+    r_pres = st.number_input("Red: sea-level pressure below (hPa)", value=990.0)
+
 # ---------- Data ----------
 @st.cache_data(ttl=300)
 def get_weather(lat, lon):
     r = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation,surface_pressure,shortwave_radiation,cloud_cover",
+        "current": "temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation,pressure_msl,shortwave_radiation,cloud_cover",
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
         "past_days": 1, "forecast_days": 2,
         "timezone": "auto", "wind_speed_unit": "ms"}, timeout=15)
@@ -94,20 +104,53 @@ def live():
     # ---------- Disaster alert banner ----------
     gust = float(c.get("wind_gusts_10m") or 0)
     rain = float(c.get("precipitation") or 0)
-    pres = float(c.get("surface_pressure") or 1013)
-    if gust >= 25 or pres < 990:
-        lvl, col, msg = "RED – DANGER", "#ef4444", "Shut down turbines, switch to battery backup, move to shelter."
-    elif gust >= 17 or rain >= 15 or pres < 1000:
-        lvl, col, msg = "ORANGE – WARNING", "#f97316", "Prepare backup power and secure equipment."
-    elif gust >= 11 or rain >= 5:
-        lvl, col, msg = "YELLOW – WATCH", "#eab308", "Stay alert and keep monitoring updates."
+    pres_raw = c.get("pressure_msl")
+    pres = float(pres_raw) if pres_raw is not None else None
+
+    red, orange, yellow = [], [], []
+    if gust > r_gust:
+        red.append(f"gust {gust:.1f} > {r_gust:g} m/s")
+    elif gust > o_gust:
+        orange.append(f"gust {gust:.1f} > {o_gust:g} m/s")
+    elif gust > y_gust:
+        yellow.append(f"gust {gust:.1f} > {y_gust:g} m/s")
+
+    if rain > r_rain:
+        red.append(f"rain {rain:.1f} > {r_rain:g} mm")
+    elif rain > o_rain:
+        orange.append(f"rain {rain:.1f} > {o_rain:g} mm")
+    elif rain > y_rain:
+        yellow.append(f"rain {rain:.1f} > {y_rain:g} mm")
+
+    if pres is not None:
+        if pres < r_pres:
+            red.append(f"pressure {pres:.0f} < {r_pres:g} hPa")
+        elif pres < o_pres:
+            orange.append(f"pressure {pres:.0f} < {o_pres:g} hPa")
+
+    if red:
+        lvl, col = "RED – DANGER", "#ef4444"
+        msg = "Shut down turbines, switch to battery backup, move to shelter."
+        why = "Triggered by: " + ", ".join(red)
+    elif orange:
+        lvl, col = "ORANGE – WARNING", "#f97316"
+        msg = "Prepare backup power and secure equipment."
+        why = "Triggered by: " + ", ".join(orange)
+    elif yellow:
+        lvl, col = "YELLOW – WATCH", "#eab308"
+        msg = "Stay alert and keep monitoring updates."
+        why = "Triggered by: " + ", ".join(yellow)
     else:
-        lvl, col, msg = "GREEN – NORMAL", "#22c55e", "Normal operation."
+        lvl, col = "GREEN – NORMAL", "#22c55e"
+        msg = "Normal operation."
+        why = "All values are within limits."
+
+    pres_txt = f"{pres:.0f} hPa" if pres is not None else "n/a"
     st.markdown(
         f"<div style='background:{col}22;border:2px solid {col};border-radius:14px;"
         f"padding:14px;margin:10px 0'><h3 style='margin:0;color:{col}'>⚠ {lvl}</h3>"
         f"<p style='margin:6px 0 0'>Gusts {gust:.1f} m/s · Rain {rain:.1f} mm · "
-        f"Pressure {pres:.0f} hPa<br>{msg}</p>"
+        f"Sea-level pressure {pres_txt}<br>{msg}<br><i>{why}</i></p>"
         f"<p style='margin:6px 0 0;font-size:12px;opacity:.7'>Demo thresholds. "
         f"Always follow official IMD warnings (imd.gov.in).</p></div>",
         unsafe_allow_html=True)
@@ -167,7 +210,7 @@ def live():
                  line=dict(color="#a78bfa")), secondary_y=False)
     wf.add_trace(go.Scatter(x=t*1000, y=curr, name="Current (A)",
                  line=dict(color="#34d399")), secondary_y=True)
-    wf.update_layout(template=DARK, title="Inverter output waveform (50 Hz)",
+    wf.update_layout(template=DARK, title="Inverter output waveform (50 Hz, simulated)",
                      xaxis_title="Time (ms)", height=340,
                      margin=dict(l=10, r=10, t=50, b=10))
     wf.update_yaxes(title_text="Voltage (V)", secondary_y=False)
@@ -177,7 +220,7 @@ def live():
     f = np.fft.rfftfreq(n, 1 / fs)
     m = f <= 500
     sp = go.Figure(go.Bar(x=f[m], y=amp[m], marker_color="#f472b6"))
-    sp.update_layout(template=DARK, title="Current amplitude spectrum",
+    sp.update_layout(template=DARK, title="Current amplitude spectrum (simulated)",
                      xaxis_title="Frequency (Hz)", yaxis_title="Amplitude (A)",
                      height=340, margin=dict(l=10, r=10, t=50, b=10))
 
