@@ -1,4 +1,5 @@
 import time
+from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import requests
@@ -38,9 +39,22 @@ def get_weather(lat, lon):
     r.raise_for_status()
     return r.json()
 
+@st.cache_data(ttl=300)
+def get_satellite(lat, lon):
+    r = requests.get("https://satellite-api.open-meteo.com/v1/archive", params={
+        "latitude": lat, "longitude": lon,
+        "hourly": "shortwave_radiation",
+        "start_date": str(date.today() - timedelta(days=1)),
+        "end_date": str(date.today()),
+        "timezone": "auto"}, timeout=15)
+    r.raise_for_status()
+    d = pd.DataFrame(r.json()["hourly"])
+    d["time"] = pd.to_datetime(d["time"])
+    return d
+
 def wind_power(v, rated):
-    v = np.asarray(v, dtype=float) * 1.4          # 10 m -> hub height
-    p = rated * np.clip((v - 3) / 9, 0, 1) ** 3   # cut-in 3, rated 12 m/s
+    v = np.asarray(v, dtype=float) * 1.4
+    p = rated * np.clip((v - 3) / 9, 0, 1) ** 3
     return np.where((v < 3) | (v > 25), 0, p)
 
 def solar_power(rad, area):
@@ -58,17 +72,26 @@ def live():
         return
 
     c = w["current"]
-    s_kw = float(solar_power(c["shortwave_radiation"], solar_area))
+
+    try:
+        sat = get_satellite(lat, lon)
+        rad_now = float(sat["shortwave_radiation"].dropna().iloc[-1])
+        src = "Satellite (Himawari/Meteosat) + Open-Meteo"
+    except Exception:
+        rad_now = float(c["shortwave_radiation"])
+        src = "Open-Meteo weather model"
+
+    s_kw = float(solar_power(rad_now, solar_area))
     w_kw = float(wind_power(c["wind_speed_10m"], wind_rated))
     total = s_kw + w_kw
     capacity = solar_area * 0.18 * 0.8 + wind_rated
 
     st.title(f"🌍 Renewable Energy Intelligence – {place}")
-    st.caption(f"Live · updated {time.strftime('%H:%M:%S')} · source: Open-Meteo")
+    st.caption(f"Live · updated {time.strftime('%H:%M:%S')} · source: {src}")
 
     cards = [("🌡 Temperature", f"{c['temperature_2m']:.1f} °C"),
              ("💨 Wind speed", f"{c['wind_speed_10m']:.1f} m/s"),
-             ("☀ Irradiance", f"{c['shortwave_radiation']:.0f} W/m²"),
+             ("☀ Irradiance", f"{rad_now:.0f} W/m²"),
              ("☀ Solar output", f"{s_kw:.1f} kW"),
              ("🌀 Wind output", f"{w_kw:.1f} kW"),
              ("⚡ Total", f"{total:.1f} kW")]
@@ -77,7 +100,6 @@ def live():
         col.markdown(f"<div class='card'><h4>{t}</h4><h2>{v}</h2></div>",
                      unsafe_allow_html=True)
 
-    # --- 48h chart ---
     h = pd.DataFrame(w["hourly"])
     h["time"] = pd.to_datetime(h["time"])
     h["solar"] = solar_power(h["shortwave_radiation"], solar_area)
@@ -97,7 +119,6 @@ def live():
                       margin=dict(l=10, r=10, t=50, b=10))
     left.plotly_chart(fig, use_container_width=True)
 
-    # --- Gauge ---
     g = go.Figure(go.Indicator(
         mode="gauge+number", value=total,
         number={"suffix": " kW"}, title={"text": "Output vs capacity"},
@@ -109,7 +130,6 @@ def live():
     g.update_layout(template=DARK, height=360, margin=dict(l=20, r=20, t=60, b=10))
     right.plotly_chart(g, use_container_width=True)
 
-    # --- AC amplitude waveform (animated) ---
     n, fs = 800, 10000
     t = np.arange(n) / fs
     phase = (time.time() % 1) * 2 * np.pi
@@ -130,7 +150,6 @@ def live():
     wf.update_yaxes(title_text="Voltage (V)", secondary_y=False)
     wf.update_yaxes(title_text="Current (A)", secondary_y=True)
 
-    # --- FFT spectrum ---
     amp = np.abs(np.fft.rfft(curr)) / n * 2
     f = np.fft.rfftfreq(n, 1 / fs)
     m = f <= 500
